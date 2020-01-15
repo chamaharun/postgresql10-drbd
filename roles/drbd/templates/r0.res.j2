@@ -1,0 +1,15 @@
+resource r0 {
+    volume 0 {
+        device           /dev/drbd1;
+        disk             /dev/vdb1;
+        meta-disk        internal;
+    }
+    on {{ hostvars['db1'].ansible_hostname }} {
+        node-id 0;
+        address          ipv4 {{ hostvars['db1'].ansible_default_ipv4.address }}:{{ drbd_port }};
+    }
+    on {{ hostvars['db2'].ansible_hostname }} {
+        node-id 1;
+        address          ipv4 {{ hostvars['db2'].ansible_default_ipv4.address }}:{{ drbd_port }};
+    }
+}

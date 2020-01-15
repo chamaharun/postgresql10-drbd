@@ -1,0 +1,136 @@
+---  
+- name: install repos
+  yum:
+    name: 'https://download.postgresql.org/pub/repos/yum/reporpms/EL-7-x86_64/pgdg-redhat-repo-latest.noarch.rpm'
+    state: present
+
+- name: install items
+  yum:
+    name: ['postgresql10-server', 'postgresql10-contrib'] 
+    state: latest
+  when:
+  - 'not ansible_check_mode'
+
+- name: start & enable firewalld
+  systemd:
+    name: firewalld
+    state: started
+    enabled: yes
+
+- name: firewall settings
+  firewalld:
+    zone: public
+    immediate: yes
+    service: postgresql
+    state: enabled
+    permanent: yes
+
+- name: archive dir chmod
+  file:
+    state: directory
+    dest: /var/lib/pgsql/10/archive
+    group: postgres
+    owner: postgres
+    mode: 0700
+
+- name: mkdir postgres
+  file:
+    path: /mnt/postgres
+    state: directory
+
+- name: mount drbd device
+  mount:
+    path: /mnt/postgres
+    src: /dev/drbd1
+    fstype: ext4
+    state: mounted
+  when: 
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+
+- name: mkdir data
+  file:
+    path: /mnt/postgres/data
+    state: directory
+    owner: postgres
+    group: postgres
+
+- name: symbolic link
+  file:
+    src: /mnt/postgres/data
+    dest: /var/lib/pgsql/10/data
+    state: link
+    force: yes
+  when: 
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+
+- name: confirm initdb
+  stat: 
+    path: /var/lib/pgsql/10/data/log
+  register: pgsql_data_dir_files_confirm
+  when:
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+  failed_when: False
+  changed_when: False
+
+- name: postgresql initdb
+  shell: /usr/pgsql-10/bin/postgresql-10-setup initdb
+  environment:
+    PGSETUP_INITDB_OPTIONS: "--data-checksums -E utf8 --no-locale"
+  when:
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+  - pgsql_data_dir_files_confirm.stat.exists == False
+  failed_when: False
+
+- name: copy config file
+  template:
+    src: postgresql.conf.j2
+    dest: /var/lib/pgsql/10/data/postgresql.conf
+    mode: 0644
+  when:
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+
+- name: start postgresql
+  systemd:
+    name: postgresql-10
+    state: started
+  when:
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+
+- name: init sql
+  shell: /usr/pgsql-10/bin/psql -c "CREATE USER {{ postgres_user }} REPLICATION PASSWORD '{{ postgres_user_pass  }}';"
+  become: true
+  become_user: postgres
+  when:
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+  - 'not ansible_check_mode'
+
+- name: add acl to postgres
+  lineinfile:
+    path: /var/lib/pgsql/10/data/pg_hba.conf
+    line: host all all {{ permit_ip_segment }} md5
+  when:
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+  - 'not ansible_check_mode'
+
+- name: reload postgres
+  systemd:
+    name: postgresql-10
+    state: reloaded
+  when:
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+
+- name: stop postgresql
+  systemd:
+    name: postgresql-10
+    state: stopped
+  when:
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+
+- name: unmount drbd device
+  mount:
+    path: /var/lib/pgsql/10/data
+    src: /dev/drbd1
+    fstype: ext4
+    state: absent
+  when: 
+  - ansible_hostname == hostvars["db1"].ansible_hostname

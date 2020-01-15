@@ -1,0 +1,81 @@
+---
+- name: install repos
+  yum:
+    name: 'https://www.elrepo.org/elrepo-release-7.0-4.el7.elrepo.noarch.rpm'
+    state: present
+
+- name: install items
+  yum:
+    name: 'kmod-drbd90'
+    state: latest
+  when:
+  - 'not ansible_check_mode'
+
+- name: start & enable firewalld
+  systemd:
+    name: firewalld
+    state: started
+    enabled: yes
+
+- name: firewall settings for drbd
+  firewalld:
+    zone: public
+    immediate: yes
+    port: "{{ drbd_port }}/tcp"
+    state: enabled
+    permanent: yes
+
+- name: Create a new primary partition
+  parted:
+    device: /dev/vdb
+    number: 1
+    state: present
+
+- name: copy drbd resource file
+  template:
+    src: r0.res.j2
+    dest: /etc/drbd.d/r0.res
+
+- name: drbd confirm
+  shell: drbdadm status r0
+  register: drbdadm_result
+  failed_when:
+  - "'drbdadm: command not found' in drbdadm_result.stderr"
+  changed_when: False
+
+- name: create metadata
+  command: drbdadm create-md r0 --force
+  when:
+  - 'not ansible_check_mode'
+  - 'drbdadm_result.rc != 0'    
+
+- name: start drbd
+  systemd:
+    name: drbd
+    state: started
+  when:
+  - 'not ansible_check_mode'
+
+- name: promote db1
+  command: drbdadm primary --force r0
+  when: 
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+  
+- name: wait for drbd first mirroring
+  command: drbdadm dstate r0
+  register: cmd_res
+  delay: 5
+  retries: 60
+  until: cmd_res.stdout == "UpToDate/UpToDate"
+  when:
+  - 'not ansible_check_mode'
+
+- name: mkfs drbd
+  filesystem:
+    fstype: ext4
+    dev: /dev/drbd1
+  when: 
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+  - 'not ansible_check_mode'
+
+

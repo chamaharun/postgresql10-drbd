@@ -1,0 +1,110 @@
+---
+- name: install items
+  yum:
+    name: ['pcs', 'pacemaker'] 
+    state: latest
+  when:
+  - 'not ansible_check_mode'
+
+- name: start & enable firewalld
+  systemd:
+    name: firewalld
+    state: started
+    enabled: yes
+
+- name: firewall settings
+  firewalld:
+    zone: public
+    immediate: yes
+    service: high-availability
+    state: enabled
+    permanent: yes
+
+- name: start & enable pcsd
+  systemd:
+    name: pcsd
+    state: started
+    enabled: yes
+
+- name: set password for hacluster
+  shell: "echo {{ passwd  }} | passwd hacluster --stdin"   
+  when:
+  - 'not ansible_check_mode'
+
+- name: get resource file
+  get_url:
+    url: https://raw.githubusercontent.com/ClusterLabs/resource-agents/master/heartbeat/pgsql
+    dest: /usr/lib/ocf/resource.d/heartbeat/pgsql10
+    mode: 0755
+
+- name: replace pgsql to pgsql10
+  replace:
+    path: /usr/lib/ocf/resource.d/heartbeat/pgsql10
+    regexp: '(resource-agent name=)"pgsql"'
+    replace: '\1"pgsql10"'
+  when:
+  - 'not ansible_check_mode'
+
+- name: copy config file
+  copy:
+    src: "{{ item }}/pgsql"
+    dest: "{{ item }}/pgsql10"
+    remote_src: yes 
+  with_items:
+  - /usr/share/resource-agents/ocft/configs
+  when:
+  - 'not ansible_check_mode'
+
+- name: replace pgsql to pgsql10
+  replace:
+    path: /usr/share/resource-agents/ocft/configs/pgsql10
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.replace }}"
+  with_items:
+  - { regexp: '(Agent) pgsql$', replace: '\1 pgsql10'}
+  - { regexp: '^# pgsql$', replace: '# pgsql10'}
+  when:
+  - 'not ansible_check_mode'
+
+- name: pacemaker settings
+  shell: "{{ item }}" 
+  with_items:
+  - pcs cluster auth {{ hostvars["db1"].ansible_fqdn }} {{ hostvars["db2"].ansible_fqdn }} -u hacluster -p {{ passwd }}
+  - pcs cluster setup --start --name pg10 {{ hostvars["db1"].ansible_fqdn }} {{ hostvars["db2"].ansible_fqdn }}
+  - pcs node standby {{ hostvars["db2"].ansible_fqdn }}
+  - pcs property set stonith-enabled=false
+  - pcs property set no-quorum-policy=ignore
+  - pcs resource create drbd_r0 ocf:linbit:drbd drbd_resource=r0 op monitor interval=10s role=Master monitor interval=30s role=Slave
+  - pcs resource master ms_drbd_r0 drbd_r0 master-max=1 master-node-max=1 clone-max=2 clone-node-max=1 notify=true
+  - pcs resource create fs_postgres ocf:heartbeat:Filesystem device=/dev/drbd1 directory=/mnt/postgres fstype=ext4 --group postgres
+  - |
+    pcs resource create pgsql ocf:heartbeat:pgsql10 \
+    pgctl="/usr/pgsql-10/bin/pg_ctl" pgdata="/var/lib/pgsql/10/data" psql="/usr/pgsql-10/bin/psql" \
+    config="/var/lib/pgsql/10/data/postgresql.conf" stop_escalate="5" \
+    op monitor interval="11s" op monitor interval="10s" role="Master" --group postgres
+  - |
+    pcs resource create master-vip ocf:heartbeat:IPaddr2 ip={{ cluster_vip_master }} cidr_netmask={{ cluster_netmask }} \
+    nic=eth0 iflabel=master op monitor interval=5s --group postgres
+  - pcs constraint colocation add postgres ms_drbd_r0 INFINITY with-rsc-role=Master 
+  - pcs constraint order promote ms_drbd_r0 then start postgres
+  when:
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+
+- name: wait for cluster to be up
+  shell: pcs status | grep -c "Started {{ hostvars['db1'].ansible_fqdn }}"
+  register: cmd_res
+  delay: 5
+  retries: 60
+  until: cmd_res.stdout == "3"
+  when:
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+  - 'not ansible_check_mode'
+
+- name: cleanup and unstandby db2
+  shell: "{{ item }}"
+  with_items:
+  - pcs resource cleanup pgsql --node {{ hostvars["db1"].ansible_fqdn }}
+  - pcs node unstandby {{ hostvars["db2"].ansible_fqdn }}
+  when:
+  - ansible_hostname == hostvars["db1"].ansible_hostname
+

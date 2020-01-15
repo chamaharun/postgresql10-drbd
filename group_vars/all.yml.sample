@@ -1,0 +1,8 @@
+---
+passwd: passwd
+drbd_port: 7789
+cluster_vip_master: EDIT_ME{LIKE:192.168.11.188}
+cluster_netmask: EDIT_ME{LIKE:24}
+postgres_user: EDIT_ME
+postgres_user_pass: EDIT_ME
+permit_ip_segment: EDIT_ME{LIKE:192.168.11.0/24}
